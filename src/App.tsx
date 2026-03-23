@@ -1,33 +1,42 @@
 import { useEffect } from "react";
-import { RefreshCcw, Sparkles, SortDesc } from "lucide-react";
+import { LayoutGrid, RefreshCcw, Sparkles, SortDesc } from "lucide-react";
 import { BoardCanvas } from "./components/BoardCanvas";
-import { EditImagePanel } from "./components/EditImagePanel";
 import { ImageUploader } from "./components/ImageUploader";
-import { RankControls } from "./components/RankControls";
+import { useShallow } from "zustand/react/shallow";
 import { useBoardStore } from "./store/useBoardStore";
 
 export default function App() {
-  const {
-    images,
-    selectedImageId,
-    addImages,
-    setImageRank,
-    setImagePosition,
-    selectImage,
-    setImageTitle,
-    removeImage,
-    snapToRankLayout,
-    resetLayout,
-    reorderByRank,
-    reorderRankList,
-    load
-  } = useBoardStore();
+  const imageCount = useBoardStore((s) => s.images.length);
+  const { addImages, snapToRankLayout, resetLayout, reorderByRank, spreadImagesOut, load } =
+    useBoardStore(
+      useShallow((s) => ({
+        addImages: s.addImages,
+        snapToRankLayout: s.snapToRankLayout,
+        resetLayout: s.resetLayout,
+        reorderByRank: s.reorderByRank,
+        spreadImagesOut: s.spreadImagesOut,
+        load: s.load
+      }))
+    );
 
   useEffect(() => {
     load();
   }, [load]);
 
-  const selectedImage = images.find((img) => img.id === selectedImageId) ?? null;
+  useEffect(() => {
+    const persist = () => {
+      useBoardStore.getState().save();
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") persist();
+    };
+    window.addEventListener("beforeunload", persist);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("beforeunload", persist);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, []);
 
   return (
     <main className="min-h-screen bg-slate-100 p-5">
@@ -49,6 +58,15 @@ export default function App() {
                 Sort By Rank
               </button>
               <button
+                type="button"
+                onClick={spreadImagesOut}
+                disabled={imageCount === 0}
+                className="inline-flex items-center gap-2 rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:pointer-events-none disabled:opacity-40"
+              >
+                <LayoutGrid className="h-4 w-4" />
+                Spread out (no overlap)
+              </button>
+              <button
                 onClick={snapToRankLayout}
                 className="inline-flex items-center gap-2 rounded-xl bg-slate-900 px-3 py-2 text-sm text-white hover:bg-slate-800"
               >
@@ -67,23 +85,7 @@ export default function App() {
           <ImageUploader onFiles={addImages} />
         </header>
 
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-[320px_1fr]">
-          <RankControls
-            images={images}
-            onRankChange={setImageRank}
-            onReorderRanks={reorderRankList}
-          />
-          <div className="relative">
-            <BoardCanvas images={images} onMoveImage={setImagePosition} onSelectImage={selectImage} />
-            <EditImagePanel
-              image={selectedImage}
-              onClose={() => selectImage(null)}
-              onRankChange={setImageRank}
-              onTitleChange={setImageTitle}
-              onDelete={removeImage}
-            />
-          </div>
-        </div>
+        <BoardCanvas />
       </div>
     </main>
   );

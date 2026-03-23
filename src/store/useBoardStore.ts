@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import type { BoardImage, BoardSnapshot, Point } from "../types/board";
-import { calculateRankLayout } from "../utils/layout";
+import { calculateRankLayout, layoutNewUploads, layoutSpreadNoOverlap } from "../utils/layout";
 
 const STORAGE_KEY = "freeform-image-ranking-board";
 
@@ -8,23 +8,39 @@ type BoardState = {
   images: BoardImage[];
   rankMin: number;
   rankMax: number;
-  selectedImageId: string | null;
   addImages: (files: File[]) => void;
   setImageRank: (id: string, rank: number) => void;
   setImageTitle: (id: string, title: string) => void;
   setImagePosition: (id: string, point: Point) => void;
   removeImage: (id: string) => void;
-  selectImage: (id: string | null) => void;
   snapToRankLayout: () => void;
   resetLayout: () => void;
   reorderByRank: () => void;
-  reorderRankList: (orderedIds: string[]) => void;
+  spreadImagesOut: () => void;
   save: () => void;
   load: () => void;
 };
 
 function clamp(num: number, min: number, max: number) {
   return Math.min(max, Math.max(min, num));
+}
+
+let positionSaveTimer: ReturnType<typeof setTimeout> | null = null;
+
+function schedulePositionPersist(get: () => { save: () => void }) {
+  if (positionSaveTimer) clearTimeout(positionSaveTimer);
+  positionSaveTimer = setTimeout(() => {
+    positionSaveTimer = null;
+    get().save();
+  }, 400);
+}
+
+/** If a debounced position save was scheduled, run it now (avoids losing drags before other writes). */
+function flushPositionPersist(get: () => { save: () => void }) {
+  if (!positionSaveTimer) return;
+  clearTimeout(positionSaveTimer);
+  positionSaveTimer = null;
+  get().save();
 }
 
 function createImageFromFile(file: File): Promise<BoardImage> {
@@ -53,19 +69,19 @@ function createImageFromFile(file: File): Promise<BoardImage> {
 export const useBoardStore = create<BoardState>((set, get) => ({
   images: [],
   rankMin: 1,
-  rankMax: 10,
-  selectedImageId: null,
+  rankMax: 7,
 
   addImages: (files) => {
     void Promise.all(files.map((f) => createImageFromFile(f))).then((newImages) => {
+      flushPositionPersist(get);
       set((state) => {
+        const uploadLayout = layoutNewUploads(newImages.map((img) => img.id));
         const merged = [...state.images, ...newImages];
-        const layout = calculateRankLayout(merged, state.rankMin, state.rankMax);
         return {
-          images: merged.map((img) => ({
-            ...img,
-            position: layout[img.id] ?? img.position
-          }))
+          images: merged.map((img) => {
+            const p = uploadLayout[img.id];
+            return p ? { ...img, position: p } : img;
+          })
         };
       });
       get().save();
@@ -73,6 +89,7 @@ export const useBoardStore = create<BoardState>((set, get) => ({
   },
 
   setImageRank: (id, rank) => {
+    flushPositionPersist(get);
     set((state) => {
       const next = state.images.map((img) =>
         img.id === id
@@ -88,6 +105,7 @@ export const useBoardStore = create<BoardState>((set, get) => ({
   },
 
   setImageTitle: (id, title) => {
+    flushPositionPersist(get);
     set((state) => ({
       images: state.images.map((img) => (img.id === id ? { ...img, title } : img))
     }));
@@ -98,20 +116,19 @@ export const useBoardStore = create<BoardState>((set, get) => ({
     set((state) => ({
       images: state.images.map((img) => (img.id === id ? { ...img, position: point } : img))
     }));
-    get().save();
+    schedulePositionPersist(get);
   },
 
   removeImage: (id) => {
+    flushPositionPersist(get);
     set((state) => ({
-      images: state.images.filter((img) => img.id !== id),
-      selectedImageId: state.selectedImageId === id ? null : state.selectedImageId
+      images: state.images.filter((img) => img.id !== id)
     }));
     get().save();
   },
 
-  selectImage: (id) => set({ selectedImageId: id }),
-
   snapToRankLayout: () => {
+    flushPositionPersist(get);
     set((state) => {
       const layout = calculateRankLayout(state.images, state.rankMin, state.rankMax);
       return {
@@ -137,24 +154,25 @@ export const useBoardStore = create<BoardState>((set, get) => ({
     }));
   },
 
-  reorderRankList: (orderedIds) => {
+  spreadImagesOut: () => {
+    flushPositionPersist(get);
     set((state) => {
-      const step = (state.rankMax - state.rankMin) / Math.max(1, orderedIds.length - 1);
-      const next = state.images.map((img) => {
-        const idx = orderedIds.indexOf(img.id);
-        if (idx === -1) return img;
-        const computed = Math.round(state.rankMax - step * idx);
-        return { ...img, rank: clamp(computed, state.rankMin, state.rankMax) };
-      });
-      const layout = calculateRankLayout(next, state.rankMin, state.rankMax);
+      const layout = layoutSpreadNoOverlap(state.images);
       return {
-        images: next.map((img) => ({ ...img, position: layout[img.id] ?? img.position }))
+        images: state.images.map((img) => ({
+          ...img,
+          position: layout[img.id] ?? img.position
+        }))
       };
     });
     get().save();
   },
 
   save: () => {
+    if (positionSaveTimer) {
+      clearTimeout(positionSaveTimer);
+      positionSaveTimer = null;
+    }
     const { images, rankMin, rankMax } = get();
     const payload: BoardSnapshot = {
       images,
@@ -169,10 +187,15 @@ export const useBoardStore = create<BoardState>((set, get) => ({
     try {
       const parsed = JSON.parse(raw) as BoardSnapshot;
       if (!Array.isArray(parsed.images)) return;
+      const rankMin = 1;
+      const rankMax = 7;
       set({
-        images: parsed.images,
-        rankMin: parsed.rankScale?.min ?? 1,
-        rankMax: parsed.rankScale?.max ?? 10
+        images: parsed.images.map((img) => ({
+          ...img,
+          rank: clamp(img.rank ?? 5, rankMin, rankMax)
+        })),
+        rankMin,
+        rankMax
       });
     } catch {
       // Ignore invalid payload and continue with defaults.
