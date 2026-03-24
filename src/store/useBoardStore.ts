@@ -1,6 +1,9 @@
 import { create } from "zustand";
 import type { BoardImage, BoardSnapshot, Point } from "../types/board";
-import { calculateRankLayout, layoutNewUploads, layoutSpreadNoOverlap } from "../utils/layout";
+import { migrateLegacyDescription } from "../utils/parseCampaignDescription";
+import { calculateRankLayout, layoutSpreadNoOverlap } from "../utils/layout";
+
+export type CampaignFieldKey = "brand" | "campaign" | "date" | "category";
 
 const STORAGE_KEY = "freeform-image-ranking-board";
 
@@ -11,6 +14,8 @@ type BoardState = {
   addImages: (files: File[]) => void;
   setImageRank: (id: string, rank: number) => void;
   setImageTitle: (id: string, title: string) => void;
+  setImageDescription: (id: string, description: string) => void;
+  setImageCampaignField: (id: string, field: CampaignFieldKey, value: string) => void;
   setImagePosition: (id: string, point: Point) => void;
   removeImage: (id: string) => void;
   snapToRankLayout: () => void;
@@ -56,6 +61,7 @@ function createImageFromFile(file: File): Promise<BoardImage> {
         id: crypto.randomUUID(),
         src,
         title: file.name.replace(/\.[^/.]+$/, ""),
+        description: "",
         rank: 5,
         position: { x: 0, y: 0 },
         createdAt: Date.now()
@@ -64,6 +70,22 @@ function createImageFromFile(file: File): Promise<BoardImage> {
     reader.onerror = () => reject(reader.error ?? new Error("Unknown file read error"));
     reader.readAsDataURL(file);
   });
+}
+
+function inferRankFromFilename(fileName: string, minRank: number, maxRank: number): number | null {
+  // Assign "Picture N.*" files directly to rank N (clamped to current scale).
+  const match = fileName.match(/^picture\s+(\d+)/i);
+  if (!match) return null;
+  const n = Number(match[1]);
+  if (!Number.isFinite(n)) return null;
+  return clamp(Math.round(n), minRank, maxRank);
+}
+
+function isCategoryPictureTitle(title: string): boolean {
+  const match = title.match(/^Picture\s+(\d+)$/i);
+  if (!match) return false;
+  const n = Number(match[1]);
+  return Number.isFinite(n) && n >= 1 && n <= 21;
 }
 
 export const useBoardStore = create<BoardState>((set, get) => ({
@@ -75,13 +97,14 @@ export const useBoardStore = create<BoardState>((set, get) => ({
     void Promise.all(files.map((f) => createImageFromFile(f))).then((newImages) => {
       flushPositionPersist(get);
       set((state) => {
-        const uploadLayout = layoutNewUploads(newImages.map((img) => img.id));
-        const merged = [...state.images, ...newImages];
+        const rankedNewImages = newImages.map((img, i) => {
+          const inferred = inferRankFromFilename(files[i]?.name ?? "", state.rankMin, state.rankMax);
+          return inferred ? { ...img, rank: inferred } : img;
+        });
+        const merged = [...state.images, ...rankedNewImages];
+        const layout = calculateRankLayout(merged, state.rankMin, state.rankMax);
         return {
-          images: merged.map((img) => {
-            const p = uploadLayout[img.id];
-            return p ? { ...img, position: p } : img;
-          })
+          images: merged.map((img) => ({ ...img, position: layout[img.id] ?? img.position }))
         };
       });
       get().save();
@@ -108,6 +131,25 @@ export const useBoardStore = create<BoardState>((set, get) => ({
     flushPositionPersist(get);
     set((state) => ({
       images: state.images.map((img) => (img.id === id ? { ...img, title } : img))
+    }));
+    get().save();
+  },
+
+  setImageDescription: (id, description) => {
+    flushPositionPersist(get);
+    set((state) => ({
+      images: state.images.map((img) => (img.id === id ? { ...img, description } : img))
+    }));
+    get().save();
+  },
+
+  setImageCampaignField: (id, field, value) => {
+    flushPositionPersist(get);
+    const v = value.trim();
+    set((state) => ({
+      images: state.images.map((img) =>
+        img.id === id ? { ...img, [field]: v || undefined } : img
+      )
     }));
     get().save();
   },
@@ -189,11 +231,26 @@ export const useBoardStore = create<BoardState>((set, get) => ({
       if (!Array.isArray(parsed.images)) return;
       const rankMin = 1;
       const rankMax = 7;
+      const filtered = parsed.images.filter(
+        (img) => !isCategoryPictureTitle(img.title ?? "") && clamp(img.rank ?? 5, rankMin, rankMax) !== 5
+      );
       set({
-        images: parsed.images.map((img) => ({
-          ...img,
-          rank: clamp(img.rank ?? 5, rankMin, rankMax)
-        })),
+        images: filtered.map((img) => {
+          const base = {
+            ...img,
+            description: typeof img.description === "string" ? img.description : "",
+            rank: clamp(img.rank ?? 5, rankMin, rankMax)
+          };
+          const m = migrateLegacyDescription(base as BoardImage);
+          return {
+            ...base,
+            brand: m.brand,
+            campaign: m.campaign,
+            date: m.date,
+            category: m.category,
+            description: m.description
+          };
+        }),
         rankMin,
         rankMax
       });

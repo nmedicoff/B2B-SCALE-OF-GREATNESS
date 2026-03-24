@@ -1,217 +1,259 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { PointerEvent as ReactPointerEvent } from "react";
-import { Focus } from "lucide-react";
+import { useMemo, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
+import { FILTER_INDUSTRY_OPTIONS } from "../constants/industries";
+import type { BoardImage } from "../types/board";
+import { SPECTRUM_LABELS, SPECTRUM_SCALE } from "../constants/spectrum";
 import { useBoardStore } from "../store/useBoardStore";
 import { ImageCard } from "./ImageCard";
+import damagingHeader from "../../input/VISUAL CARDS/1. Damaging .png";
+import invisibleHeader from "../../input/VISUAL CARDS/2. Invisible .png";
+import noticedHeader from "../../input/VISUAL CARDS/3. Noticed.png";
+import provocativeHeader from "../../input/VISUAL CARDS/4. Provocative.png";
+import invitingHeader from "../../input/VISUAL CARDS/5. Inviting.png";
+import enduringHeader from "../../input/VISUAL CARDS/6. Enduring.png";
+import transformativeHeader from "../../input/VISUAL CARDS/7. Transformative.png";
 
-const MIN_ZOOM = 0.5;
-const MAX_ZOOM = 2.2;
-/** Allow zooming out further when framing all cards so wide boards still fit. */
-const FIT_MIN_ZOOM = 0.06;
-/** Match `ImageCard` footprint for bounds (star strip + card body). */
-const CARD_W = 190;
-const CARD_STACK_H = 236;
+const inputImageModules = import.meta.glob("../input/**/*.{png,jpg,jpeg,webp,gif}", {
+  eager: true,
+  query: "?url",
+  import: "default"
+}) as Record<string, string>;
 
-function clamp(num: number, min: number, max: number) {
-  return Math.min(max, Math.max(min, num));
+function buildHeaderVisualMap(): Record<number, string> {
+  const result: Record<number, string> = {};
+  for (const [path, src] of Object.entries(inputImageModules)) {
+    if (!path.includes("/VISUAL CARDS/")) continue;
+    const name = path.split("/").pop() ?? "";
+    const match = name.match(/^\s*([1-7])\s*\.\s*/);
+    if (!match) continue;
+    const rank = Number(match[1]);
+    result[rank] = src;
+  }
+  return result;
 }
 
-const DEFAULT_PAN = { x: 180, y: 140 };
-const DEFAULT_ZOOM = 1;
+const headerVisualByRank = buildHeaderVisualMap();
+headerVisualByRank[1] = damagingHeader;
+headerVisualByRank[2] = invisibleHeader;
+headerVisualByRank[3] = noticedHeader;
+headerVisualByRank[4] = provocativeHeader;
+headerVisualByRank[5] = invitingHeader;
+headerVisualByRank[6] = enduringHeader;
+headerVisualByRank[7] = transformativeHeader;
+
+type FilterDimension = "industry" | "date" | "brand";
+
+const selectClass =
+  "min-w-0 max-w-[min(100%,220px)] cursor-pointer rounded-lg border border-slate-300 bg-white py-1.5 pl-2 pr-8 text-sm text-slate-800 shadow-sm focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200 sm:max-w-xs";
+
+function uniqueSorted(values: Iterable<string>): string[] {
+  const set = new Set<string>();
+  for (const v of values) {
+    const t = v.trim();
+    if (t) set.add(t);
+  }
+  return [...set].sort((a, b) => a.localeCompare(b));
+}
+
+function imageMatchesFilter(
+  img: BoardImage,
+  dimension: FilterDimension,
+  value: string | "all"
+): boolean {
+  if (value === "all") return true;
+  if (dimension === "industry") return (img.category ?? "").trim() === value;
+  if (dimension === "date") return (img.date ?? "").trim() === value;
+  return (img.brand ?? "").trim() === value;
+}
 
 export function BoardCanvas() {
-  const { images, rankMin, rankMax, setImagePosition, setImageRank, removeImage } = useBoardStore(
-    useShallow((s) => ({
-      images: s.images,
-      rankMin: s.rankMin,
-      rankMax: s.rankMax,
-      setImagePosition: s.setImagePosition,
-      setImageRank: s.setImageRank,
-      removeImage: s.removeImage
-    }))
+  const [filterDimension, setFilterDimension] = useState<FilterDimension>("industry");
+  const [filterValue, setFilterValue] = useState<string | "all">("all");
+
+  const { images, rankMin, rankMax, removeImage, setImageDescription, setImageCampaignField } =
+    useBoardStore(
+      useShallow((s) => ({
+        images: s.images,
+        rankMin: s.rankMin,
+        rankMax: s.rankMax,
+        removeImage: s.removeImage,
+        setImageDescription: s.setImageDescription,
+        setImageCampaignField: s.setImageCampaignField
+      }))
+    );
+
+  const rankMap: Record<number, typeof images> = {};
+  for (const n of SPECTRUM_SCALE) rankMap[n] = [];
+  for (const img of images) {
+    const rank = Math.max(rankMin, Math.min(rankMax, img.rank));
+    if (!rankMap[rank]) rankMap[rank] = [];
+    rankMap[rank].push(img);
+  }
+  for (const n of SPECTRUM_SCALE) {
+    rankMap[n].sort((a, b) => a.createdAt - b.createdAt);
+  }
+
+  const dateOptions = useMemo(
+    () => uniqueSorted(images.map((img) => img.date ?? "")),
+    [images]
+  );
+  const brandOptions = useMemo(
+    () => uniqueSorted(images.map((img) => img.brand ?? "")),
+    [images]
   );
 
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const [zoom, setZoom] = useState(DEFAULT_ZOOM);
-  const [pan, setPan] = useState(DEFAULT_PAN);
-  const [isPanning, setIsPanning] = useState(false);
-  const [spaceHeld, setSpaceHeld] = useState(false);
-  const prevImageCountRef = useRef(images.length);
-
-  useEffect(() => {
-    if (images.length > prevImageCountRef.current) {
-      setPan(DEFAULT_PAN);
-      setZoom(DEFAULT_ZOOM);
-    }
-    prevImageCountRef.current = images.length;
-  }, [images.length]);
-
-  useEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-
-    const wheelAccum = { x: 0, y: 0 };
-    let wheelRaf = 0;
-
-    const flushWheelPan = () => {
-      wheelRaf = 0;
-      const dx = wheelAccum.x;
-      const dy = wheelAccum.y;
-      wheelAccum.x = 0;
-      wheelAccum.y = 0;
-      if (dx === 0 && dy === 0) return;
-      setPan((p) => ({ x: p.x - dx, y: p.y - dy }));
-    };
-
-    const normalizeDelta = (e: WheelEvent) => {
-      let dx = e.deltaX;
-      let dy = e.deltaY;
-      if (e.deltaMode === WheelEvent.DOM_DELTA_LINE) {
-        dx *= 16;
-        dy *= 16;
-      } else if (e.deltaMode === WheelEvent.DOM_DELTA_PAGE) {
-        dx *= el.clientWidth;
-        dy *= el.clientHeight;
-      }
-      return { dx, dy };
-    };
-
-    const onWheel = (e: WheelEvent) => {
-      if (e.metaKey || e.ctrlKey) {
-        e.preventDefault();
-        setZoom((z) => clamp(z - e.deltaY * 0.0015, MIN_ZOOM, MAX_ZOOM));
-        return;
-      }
-      e.preventDefault();
-      const { dx, dy } = normalizeDelta(e);
-      wheelAccum.x += dx;
-      wheelAccum.y += dy;
-      if (!wheelRaf) {
-        wheelRaf = requestAnimationFrame(flushWheelPan);
-      }
-    };
-
-    el.addEventListener("wheel", onWheel, { passive: false });
-    return () => {
-      cancelAnimationFrame(wheelRaf);
-      el.removeEventListener("wheel", onWheel);
-    };
-  }, []);
-
-  const boardStyle = useMemo(
-    () => ({
-      transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
-      transformOrigin: "0 0"
-    }),
-    [pan.x, pan.y, zoom]
-  );
-
-  const fitImagesToView = useCallback(() => {
-    const el = containerRef.current;
-    if (!el || images.length === 0) return;
-
-    const W = el.clientWidth;
-    const H = el.clientHeight;
-    const padding = 40;
-
-    let minX = Infinity;
-    let minY = Infinity;
-    let maxX = -Infinity;
-    let maxY = -Infinity;
-    for (const img of images) {
-      minX = Math.min(minX, img.position.x);
-      minY = Math.min(minY, img.position.y);
-      maxX = Math.max(maxX, img.position.x + CARD_W);
-      maxY = Math.max(maxY, img.position.y + CARD_STACK_H);
-    }
-
-    const cw = Math.max(maxX - minX, 1);
-    const ch = Math.max(maxY - minY, 1);
-    const cx = (minX + maxX) / 2;
-    const cy = (minY + maxY) / 2;
-
-    const zoomX = (W - 2 * padding) / cw;
-    const zoomY = (H - 2 * padding) / ch;
-    const nextZoom = clamp(Math.min(zoomX, zoomY), FIT_MIN_ZOOM, MAX_ZOOM);
-
-    setPan({ x: 1800 - nextZoom * cx, y: 1800 - nextZoom * cy });
-    setZoom(nextZoom);
-  }, [images]);
-
-  const startPan = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (!spaceHeld && event.button !== 1) return;
-    event.preventDefault();
-    setIsPanning(true);
-    const startX = event.clientX;
-    const startY = event.clientY;
-    const startPanPos = pan;
-
-    const onMove = (ev: PointerEvent) => {
-      setPan({
-        x: startPanPos.x + (ev.clientX - startX),
-        y: startPanPos.y + (ev.clientY - startY)
-      });
-    };
-
-    const onUp = () => {
-      setIsPanning(false);
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
-    };
-
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp, { once: true });
+  const visibleInRank = (rank: number) => {
+    const list = rankMap[rank];
+    return list.filter((img) => imageMatchesFilter(img, filterDimension, filterValue));
   };
 
   return (
-    <div
-      ref={containerRef}
-      className={`freeform-grid relative h-[calc(100vh-220px)] overflow-hidden rounded-2xl border border-slate-200 ${
-        isPanning ? "cursor-grabbing" : "cursor-default"
-      }`}
-      onPointerDown={startPan}
-      onKeyDown={(e) => {
-        if (e.code === "Space") setSpaceHeld(true);
-      }}
-      onKeyUp={(e) => {
-        if (e.code === "Space") setSpaceHeld(false);
-      }}
-      tabIndex={0}
-    >
-      <div className="absolute left-4 top-4 z-50 flex max-w-[min(100%-2rem,20rem)] flex-col gap-2 rounded-xl bg-white/90 p-2 text-xs text-slate-600 shadow sm:max-w-none sm:flex-row sm:items-center sm:gap-3 sm:px-3 sm:py-2">
-        <span className="shrink-0">
-          Pan: two-finger scroll · Zoom: {(zoom * 100).toFixed(0)}% (ctrl/cmd + wheel or pinch)
-        </span>
-        <button
-          type="button"
-          disabled={images.length === 0}
-          onClick={(e) => {
-            e.stopPropagation();
-            fitImagesToView();
-          }}
-          className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-800 shadow-sm transition hover:bg-slate-50 disabled:pointer-events-none disabled:opacity-40"
-        >
-          <Focus className="h-3.5 w-3.5" aria-hidden />
-          Fit images to view
-        </button>
-      </div>
-      <div className="absolute left-1/2 top-1/2 h-[3600px] w-[3600px] -translate-x-1/2 -translate-y-1/2">
-        <div className="relative h-full w-full" style={boardStyle}>
-          {images.map((img) => (
-            <ImageCard
-              key={img.id}
-              image={img}
-              zoom={zoom}
-              rankMin={rankMin}
-              rankMax={rankMax}
-              onDrag={setImagePosition}
-              onRankChange={setImageRank}
-              onDelete={removeImage}
-            />
-          ))}
+    <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-soft">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 pb-3">
+        <h2 className="text-sm font-semibold text-slate-900">7 Point Scale</h2>
+        <div className="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-x-2 gap-y-1.5 sm:flex-initial">
+          <span className="shrink-0 text-sm text-slate-600">Filter by</span>
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <label htmlFor="board-filter-dimension" className="sr-only">
+              Filter field
+            </label>
+            <select
+              id="board-filter-dimension"
+              value={filterDimension}
+              onChange={(e) => {
+                setFilterDimension(e.target.value as FilterDimension);
+                setFilterValue("all");
+              }}
+              className={selectClass}
+            >
+              <option value="industry">Industry</option>
+              <option value="date">Date</option>
+              <option value="brand">Brand</option>
+            </select>
+            {filterDimension === "industry" ? (
+              <>
+                <span className="text-slate-300" aria-hidden>
+                  /
+                </span>
+                <label htmlFor="board-filter-industry-value" className="sr-only">
+                  Industry category
+                </label>
+                <select
+                  id="board-filter-industry-value"
+                  value={filterValue}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setFilterValue(v === "all" ? "all" : v);
+                  }}
+                  className={selectClass}
+                >
+                  <option value="all">All industries</option>
+                  {FILTER_INDUSTRY_OPTIONS.map((opt) => (
+                    <option key={opt} value={opt}>
+                      {opt}
+                    </option>
+                  ))}
+                </select>
+              </>
+            ) : null}
+            {filterDimension === "date" ? (
+              <>
+                <span className="text-slate-300" aria-hidden>
+                  /
+                </span>
+                <label htmlFor="board-filter-date-value" className="sr-only">
+                  Date
+                </label>
+                <select
+                  id="board-filter-date-value"
+                  value={filterValue}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setFilterValue(v === "all" ? "all" : v);
+                  }}
+                  className={selectClass}
+                >
+                  <option value="all">All dates</option>
+                  {dateOptions.map((opt) => (
+                    <option key={opt} value={opt}>
+                      {opt}
+                    </option>
+                  ))}
+                </select>
+              </>
+            ) : null}
+            {filterDimension === "brand" ? (
+              <>
+                <span className="text-slate-300" aria-hidden>
+                  /
+                </span>
+                <label htmlFor="board-filter-brand-value" className="sr-only">
+                  Brand
+                </label>
+                <select
+                  id="board-filter-brand-value"
+                  value={filterValue}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setFilterValue(v === "all" ? "all" : v);
+                  }}
+                  className={selectClass}
+                >
+                  <option value="all">All brands</option>
+                  {brandOptions.map((opt) => (
+                    <option key={opt} value={opt}>
+                      {opt}
+                    </option>
+                  ))}
+                </select>
+              </>
+            ) : null}
+          </div>
         </div>
       </div>
-    </div>
+
+      <div className="overflow-x-auto">
+        <div className="grid min-w-[1200px] grid-cols-7 gap-4">
+          {SPECTRUM_SCALE.map((n) => {
+            const shown = visibleInRank(n);
+            return (
+              <div key={n} className="rounded-xl border border-slate-200 bg-slate-50/70">
+                <div className="sticky top-0 z-10 rounded-t-xl border-b border-slate-200 bg-slate-100 px-3 py-2">
+                  {headerVisualByRank[n] ? (
+                    <div className="mb-2 h-32 w-full overflow-hidden rounded-md">
+                      <img
+                        src={headerVisualByRank[n]}
+                        alt={`${n}. ${SPECTRUM_LABELS[n]}`}
+                        className="h-full w-full scale-[1.12] rounded-md border-2 border-black object-cover object-center"
+                      />
+                    </div>
+                  ) : null}
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-700">
+                    {n}. {SPECTRUM_LABELS[n]}
+                  </p>
+                </div>
+                <div className="flex min-h-[420px] flex-col items-stretch gap-3 p-3">
+                  {shown.length === 0 ? (
+                    <div className="mt-6 rounded-lg border border-dashed border-slate-300 px-3 py-2 text-xs text-slate-400">
+                      No images
+                    </div>
+                  ) : (
+                    shown.map((img) => (
+                      <ImageCard
+                        key={img.id}
+                        image={img}
+                        onDelete={removeImage}
+                        onDescriptionChange={setImageDescription}
+                        onCampaignFieldChange={setImageCampaignField}
+                      />
+                    ))
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </section>
   );
 }
