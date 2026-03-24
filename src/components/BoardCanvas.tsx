@@ -1,10 +1,11 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { FILTER_INDUSTRY_OPTIONS } from "../constants/industries";
 import type { BoardImage } from "../types/board";
 import { SPECTRUM_LABELS, SPECTRUM_SCALE } from "../constants/spectrum";
 import { useBoardStore } from "../store/useBoardStore";
 import { ImageCard } from "./ImageCard";
+import { getDominantColorCached } from "../utils/dominantColor";
 import damagingHeader from "../../input/VISUAL CARDS/1. Damaging .png";
 import invisibleHeader from "../../input/VISUAL CARDS/2. Invisible .png";
 import noticedHeader from "../../input/VISUAL CARDS/3. Noticed.png";
@@ -69,6 +70,10 @@ function imageMatchesFilter(
 export function BoardCanvas() {
   const [filterDimension, setFilterDimension] = useState<FilterDimension>("industry");
   const [filterValue, setFilterValue] = useState<string | "all">("all");
+
+  useEffect(() => {
+    void getDominantColorCached(damagingHeader);
+  }, []);
 
   const { images, rankMin, rankMax, removeImage, setImageDescription, setImageCampaignField } =
     useBoardStore(
@@ -242,6 +247,8 @@ export function BoardCanvas() {
                       <ImageCard
                         key={img.id}
                         image={img}
+                        columnHeaderSrc={headerVisualByRank[n]}
+                        prominentColumnBackground={n === 1}
                         onDelete={removeImage}
                         onDescriptionChange={setImageDescription}
                         onCampaignFieldChange={setImageCampaignField}

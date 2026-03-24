@@ -1,6 +1,7 @@
 import {
   memo,
   useCallback,
+  useEffect,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -12,6 +13,16 @@ import pictureThree from "../../input/Picture 3.png";
 import type { CampaignFieldKey } from "../store/useBoardStore";
 import type { BoardImage } from "../types/board";
 import {
+  COLUMN_ACCENT_FALLBACK_RGB,
+  columnAccentBackMainStyle,
+  columnAccentFieldsSectionStyle,
+  columnAccentFooterStyle,
+  columnAccentImageWellStyle,
+  columnAccentInnerPanelStyle,
+  columnAccentShellStyle,
+  getDominantColorCached
+} from "../utils/dominantColor";
+import {
   buildBriefApproachDescription,
   parseBriefAndApproach
 } from "../utils/parseCampaignDescription";
@@ -22,8 +33,46 @@ type CardDims = {
   imgClass: string;
 };
 
-function shellClass(d: CardDims) {
-  return `flex w-full flex-col overflow-hidden rounded-2xl border border-slate-200/90 bg-white shadow-[0_2px_8px_rgb(0_0_0_/0.08),0_12px_40px_-8px_rgb(0_0_0_/0.35)] ${d.shell}`;
+function baseShellClass(d: CardDims) {
+  return `flex w-full flex-col overflow-hidden rounded-2xl border ${d.shell}`;
+}
+
+type ColumnChrome = {
+  shell: CSSProperties;
+  imageWell: CSSProperties;
+  fieldsSection: CSSProperties;
+  innerPanel: CSSProperties;
+  footer: CSSProperties;
+  backMain: CSSProperties;
+};
+
+function chromeFromAccentRgb(rgb: string, prominentBackground: boolean): ColumnChrome {
+  return {
+    shell: columnAccentShellStyle(rgb, prominentBackground),
+    imageWell: columnAccentImageWellStyle(rgb, prominentBackground),
+    fieldsSection: columnAccentFieldsSectionStyle(rgb, prominentBackground),
+    innerPanel: columnAccentInnerPanelStyle(rgb, prominentBackground),
+    footer: columnAccentFooterStyle(rgb, prominentBackground),
+    backMain: columnAccentBackMainStyle(rgb, prominentBackground)
+  };
+}
+
+function useColumnChrome(headerSrc: string | undefined, prominentBackground: boolean): ColumnChrome {
+  const [rgb, setRgb] = useState(COLUMN_ACCENT_FALLBACK_RGB);
+  useEffect(() => {
+    if (!headerSrc) return;
+    let cancelled = false;
+    getDominantColorCached(headerSrc).then((c) => {
+      if (!cancelled) setRgb(c);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [headerSrc]);
+  return useMemo(
+    () => chromeFromAccentRgb(rgb, prominentBackground),
+    [rgb, prominentBackground]
+  );
 }
 
 const textFieldClass =
@@ -116,6 +165,7 @@ function LabeledGrowField({
 
 function CardFrontInner({
   dims,
+  chrome,
   image,
   imageTitle,
   layout,
@@ -127,6 +177,7 @@ function CardFrontInner({
   onCampaignFieldChange
 }: {
   dims: CardDims;
+  chrome: ColumnChrome;
   image: BoardImage;
   imageTitle: string;
   layout: "ghost" | "face";
@@ -141,9 +192,10 @@ function CardFrontInner({
   const disabled = layout === "ghost";
 
   return (
-    <div className={`${shellClass(dims)} ${stretch}`}>
+    <div className={`${baseShellClass(dims)} ${stretch}`} style={chrome.shell}>
       <div
-        className={`flex shrink-0 items-center justify-center bg-slate-50 ${dims.imageWrap}`}
+        className={`flex shrink-0 items-center justify-center ${dims.imageWrap}`}
+        style={chrome.imageWell}
       >
         <img
           src={image.src}
@@ -155,11 +207,15 @@ function CardFrontInner({
       <div
         className={
           layout === "face"
-            ? "min-h-0 flex-1 overflow-y-auto bg-white px-2.5 pb-2 pt-2"
-            : "min-h-0 shrink-0 bg-white px-2.5 pb-2 pt-2"
+            ? "min-h-0 flex-1 overflow-y-auto px-2.5 pb-2 pt-2"
+            : "min-h-0 shrink-0 px-2.5 pb-2 pt-2"
         }
+        style={chrome.fieldsSection}
       >
-        <div className="space-y-2 rounded-lg border border-slate-200/90 bg-slate-50/80 px-2.5 py-2 shadow-[inset_0_1px_0_0_rgb(255_255_255_/0.6)]">
+        <div
+          className="space-y-2 rounded-lg border px-2.5 py-2 shadow-[inset_0_1px_0_0_rgb(255_255_255_/0.6)]"
+          style={chrome.innerPanel}
+        >
           <LabeledGrowField
             id={`${imageId}-brand`}
             label="Brand"
@@ -198,7 +254,10 @@ function CardFrontInner({
           />
         </div>
       </div>
-      <p className="pointer-events-none shrink-0 border-t border-slate-100 bg-slate-50 px-2 py-1 text-center text-[8px] leading-tight text-slate-400">
+      <p
+        className="pointer-events-none shrink-0 px-2 py-1 text-center text-[8px] leading-tight"
+        style={chrome.footer}
+      >
         Hover for brief & approach
       </p>
     </div>
@@ -210,6 +269,7 @@ const backTextareaClass =
 
 function CardBackInner({
   dims,
+  chrome,
   layout,
   brief,
   approach,
@@ -218,6 +278,7 @@ function CardBackInner({
   onApproachChange
 }: {
   dims: CardDims;
+  chrome: ColumnChrome;
   layout: "ghost" | "face";
   brief: string;
   approach: string;
@@ -229,11 +290,10 @@ function CardBackInner({
   const disabled = layout === "ghost";
 
   return (
-    <div className={`${shellClass(dims)} ${stretch}`}>
+    <div className={`${baseShellClass(dims)} ${stretch}`} style={chrome.shell}>
       <div
-        className={`shrink-0 border-t border-slate-200 bg-white px-3 pb-2 pt-2.5 ${
-          layout === "face" ? "min-h-0 flex-1 overflow-y-auto" : ""
-        }`}
+        className={`shrink-0 px-3 pb-2 pt-2.5 ${layout === "face" ? "min-h-0 flex-1 overflow-y-auto" : ""}`}
+        style={chrome.backMain}
       >
         <div className="space-y-2">
           <div>
@@ -274,7 +334,10 @@ function CardBackInner({
           </div>
         </div>
       </div>
-      <p className="pointer-events-none shrink-0 border-t border-slate-100 bg-slate-50 px-2 py-1 text-center text-[8px] leading-tight text-slate-400">
+      <p
+        className="pointer-events-none shrink-0 px-2 py-1 text-center text-[8px] leading-tight"
+        style={chrome.footer}
+      >
         Hover to see image
       </p>
     </div>
@@ -283,6 +346,9 @@ function CardBackInner({
 
 type Props = {
   image: BoardImage;
+  columnHeaderSrc?: string;
+  /** Column 1 (1. Damaging): strong background tint from header dominant colour. */
+  prominentColumnBackground?: boolean;
   onDelete: (id: string) => void;
   onDescriptionChange: (id: string, description: string) => void;
   onCampaignFieldChange: (id: string, field: CampaignFieldKey, value: string) => void;
@@ -293,11 +359,14 @@ const faceBase =
 
 function ImageCardInner({
   image,
+  columnHeaderSrc,
+  prominentColumnBackground = false,
   onDelete,
   onDescriptionChange,
   onCampaignFieldChange
 }: Props) {
   const isPictureThreeAsset = image.src === pictureThree;
+  const chrome = useColumnChrome(columnHeaderSrc, prominentColumnBackground);
 
   const [frontFocused, setFrontFocused] = useState(false);
   const [backFocused, setBackFocused] = useState(false);
@@ -358,6 +427,7 @@ function ImageCardInner({
       <div className={`${ghostLay} pointer-events-none -z-10 select-none opacity-0`} aria-hidden>
         <CardFrontInner
           dims={dims}
+          chrome={chrome}
           image={image}
           imageTitle={image.title || "Uploaded"}
           layout="ghost"
@@ -372,6 +442,7 @@ function ImageCardInner({
       <div className={`${ghostLay} pointer-events-none -z-10 select-none opacity-0`} aria-hidden>
         <CardBackInner
           dims={dims}
+          chrome={chrome}
           layout="ghost"
           brief={brief}
           approach={approach}
@@ -397,6 +468,7 @@ function ImageCardInner({
           >
             <CardFrontInner
               dims={dims}
+              chrome={chrome}
               image={image}
               imageTitle={image.title || "Uploaded"}
               layout="face"
@@ -419,6 +491,7 @@ function ImageCardInner({
           >
             <CardBackInner
               dims={dims}
+              chrome={chrome}
               layout="face"
               brief={brief}
               approach={approach}
@@ -436,6 +509,8 @@ function ImageCardInner({
 function propsEqual(prev: Props, next: Props) {
   return (
     prev.image === next.image &&
+    prev.columnHeaderSrc === next.columnHeaderSrc &&
+    prev.prominentColumnBackground === next.prominentColumnBackground &&
     prev.onDelete === next.onDelete &&
     prev.onDescriptionChange === next.onDescriptionChange &&
     prev.onCampaignFieldChange === next.onCampaignFieldChange
